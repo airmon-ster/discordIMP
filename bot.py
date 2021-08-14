@@ -6,6 +6,7 @@ import requests
 import websockets
 import asyncio
 import json
+import pprint
 
 import discord
 from discord.ext import commands
@@ -14,13 +15,9 @@ from dotenv import load_dotenv
 
 """
 TODO:
-     If bot is global/public
-         Lock websocket monitor user down
-         Only allow user to add themselves to the registered/DNS name list
-         Figure out how to route messages to specific users
-     Private Bot
-         Whatever
-    
+     If bot is global
+         n/a
+
 """
 
 #get os env variables
@@ -29,15 +26,12 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 
 
 #my two nodes. This dict grows with the '!bolt register <user> <pubkey>' command. Serves as janky DNS like storage
-users = {
-"skid1":"030b767818f3eb5dbc4bf6c514a6793104aaa381dbe3c65f6441272422fea1564d",
-"skid2":"034c39a618a0e65598eda2633479e718c94a36b9a797170dca27e8d5a39dfdf118"
-}
+global subscribedUsers
+subscribedUsers = {}
 
+global localNode
+localNode = '034c39a618a0e65598eda2633479e718c94a36b9a797170dca27e8d5a39dfdf118'
 
-#placeholder variables
-userSubscriptionID = None
-userSubscriptionObject = None
 
 global headers
 headers = {'Content-Type': 'application/json'}
@@ -53,95 +47,188 @@ intents.members = True
 bot = commands.Bot(command_prefix='!bolt ', intents=intents)
 
 #monitor websocket when not handling a command
-#@bot.event
-#async def on_ready():
+@bot.event
+async def on_ready():
+    async with websockets.connect('ws://localhost:8884/v1/subscribe') as websocket: #this is my second node (airmonster2)
+        while True:
+            try:
+                print("Waiting for websocket events on airmonster2!")
+                message = await websocket.recv()
+                print(message) #debug message info
+
+                msg = json.loads(message)['result']['data'] #grab message from incomming message
+                discordUser = msg.split(':bolt:')[0] ##discord username to lookup
+                discordUserMessage = msg.split(':bolt:')[1] #message
+
+                pubkey = json.loads(message)['result']['fromPubkey'] #grab sender public key from message
 
 
-                
+
+                for key, value in subscribedUsers.items(): #check to see if we are already tracking this pubkey/user
+                    if pubkey == value:
+                        pubkey = bot.get_user(key[1])
+
+                for key in subscribedUsers:
+                    resolvedUser = bot.get_user(key[1])
+                    if str(resolvedUser) == discordUser:
+                        await resolvedUser.send("Incomming Message from Websocket! \n" + "From PublicKey/User: " + pubkey + "\n" + "Message: " + discordUserMessage)
+
+
+
+            except KeyError:
+                print("Key Error: User not subscribed")
+                continue
+            except websockets.exceptions.ConnectionClosed:
+                print("Connection closed")
+                break
+            
+            except:
+                print("Other exception")
+                continue
+            
+
+              
 #set up bot command to handle sending messages via my first node (skid1). #users are managed by bot user (need to verify calling user to prevent registration issues)
-
 @bot.command(name='message', help='Sends a message via the IMPERVIOUS API! !bolt message <msg> <pubkey/username>')
 async def message(ctx, msg, pubkey):
 
+    
+    for key, value in subscribedUsers.items(): #check to see if we are already tracking this pubkey/user
+        if pubkey == key[0]:
+            pubkey = value
 
-
-    if (pubkey in users): #check to see if provided name is registered with us
-        pubkey = users[pubkey] #grab pubkey of provided user if present
+    if (pubkey in subscribedUsers): #check to see if provided name is registered with us
+        pubkey = subscribedUsers[pubkey] #grab pubkey of provided user if present
         
     req = requests.post('http://127.0.0.1:8882/v1/message/send', json={"msg":msg, "pubkey":pubkey}, headers=headers)
     res = req.text
     
-    await ctx.send("Message Sent. Awaiting your command! " + res)
-    
+    userSubscriptionID = ctx.message.author.id #get the raw, global user id
+    userSubscriptionObject = bot.get_user(int(userSubscriptionID)) #turn global user id into friendly discord id (e.g. username#1337)
 
+    await ctx.send("Processing...Check your DMs...")
+
+    await userSubscriptionObject.send("Message Sent. Awaiting your command! " + res)
+
+
+
+
+'''
 #create bot command to register usernames instead of keeping track of publickeys
-@bot.command(name='register', help='DNS for your name and public key! !bolt register <user> <pubkey>')
-async def message(ctx, user, pubkey):
+@bot.command(name='register', help='DNS for your name and public key! Running "!bolt register <pubkey>" will add your discord username#1337 to the pubkey registry')
+async def message(ctx, pubkey):
 
-    print(ctx.author.name)
+    registeredUsers[str(ctx.message.author)] = pubkey
 
-    users[user] = pubkey
-    print(users)
+    await ctx.send("Added " + str(ctx.message.author) + " to the registry!")
 
-    await ctx.send("Added user to registry!")
-    
-    
+
+    print(registeredUsers)
+'''
+
+
+#create bot command to list current registry
+@bot.command(name='registryList', help='List all those that have registered')
+async def message(ctx):
+
+    userSubscriptionID = ctx.message.author.id #get the raw, global user id
+    userSubscriptionObject = bot.get_user(int(userSubscriptionID)) #turn global user id into friendly discord id (e.g. username#1337)
+
+    await ctx.send("Processing...Check your DMs...")
+
+    await userSubscriptionObject.send("Current Registry:\n```" + str(pprint.pformat(subscribedUsers)) + "```")
+
+
+    print(subscribedUsers)
+
+
+
+
+
+
 @bot.command(name='sign', help='Sign a message with private key. !bolt sign "message"')
 async def sign(ctx, message):
 
     req = requests.post('http://127.0.0.1:8882/v1/sign', json={"msg":message}, headers=headers)
     res = req.text
 
-    await ctx.send("Signed message response: \n" + res)
-    
-    
+    userSubscriptionID = ctx.message.author.id #get the raw, global user id
+    userSubscriptionObject = bot.get_user(int(userSubscriptionID)) #turn global user id into friendly discord id (e.g. username#1337)
+
+    await ctx.send("Processing...Check your DMs...")
+
+    await userSubscriptionObject.send("Signed message response: \n```" + res + "```")
+
+
+
+
+
+
 @bot.command(name='verify', help='Verify a signed message. !bolt verify <message> <sig>')
 async def verify(ctx, message, sig):
 
     req = requests.post('http://127.0.0.1:8882/v1/verify', json={"msg":message, "signature":sig}, headers=headers)
     res = req.text
 
-    await ctx.send("Verification result: \n" + res)
+    userSubscriptionID = ctx.message.author.id #get the raw, global user id
+    userSubscriptionObject = bot.get_user(int(userSubscriptionID)) #turn global user id into friendly discord id (e.g. username#1337)
+
+    await ctx.send("Processing...Check your DMs...")
+
+    await userSubscriptionObject.send("Verification result: \n```" + res + "```")
 
 
-#this will DM whatever users hits it with incomming websocket messages. Right now only 1 user can subscribe and obviously we dont want any rando to monitor the websocket
-@bot.command(name='subscribe', help='Subscribe to receive notifications from the websocket!')
-async def subscribe(ctx):
+@bot.command(name='vpnQuote', help='Ask for quote and begin vpn services with remote node. !bolt vpnQuote <pubkey/registered name>')
+async def vpnQuote(ctx, pubkey):
 
-    global userSubscriptionID
-    userSubscriptionID = ctx.message.author.id
-    global userSubscriptionObject
-    userSubscriptionObject = bot.get_user(int(userSubscriptionID))
+    req = requests.post('http://127.0.0.1:8884/v1/vpn/quote',json={"pubkey":pubkey}, headers=headers)
+    res = req.text
+
+    userSubscriptionID = ctx.message.author.id #get the raw, global user id
+    userSubscriptionObject = bot.get_user(int(userSubscriptionID)) #turn global user id into friendly discord id (e.g. username#1337)
+
+    await ctx.send("Processing...Check your DMs...")
+
+    await userSubscriptionObject.send("Still in development... " + res)
+
+
+@bot.command(name='vpnRequest', help='Agree to the VPN terms and get your config. !bolt vpnRequest <pubkey/registered name> <nonce> <price>')
+async def vpnRequest(ctx, pubkey, nonce, price):
+
+    req = requests.post('http://127.0.0.1:8884/v1/vpn/contract',json={"pubkey":pubkey, "nonce":nonce, "price":price}, headers=headers)
+    res = req.text
+
+    userSubscriptionID = ctx.message.author.id #get the raw, global user id
+    userSubscriptionObject = bot.get_user(int(userSubscriptionID)) #turn global user id into friendly discord id (e.g. username#1337)
+
+    await ctx.send("Processing...Check your DMs...")
+
+    await userSubscriptionObject.send("Still in development... " +  res)    
+
+
+
+
+#this will sign discord users up for notifications via /v1/message/send
+@bot.command(name='subscribe', help='Subscribe to receive notifications from the websocket! !bolt subscribe <pubkey>')
+async def subscribe(ctx, pubkey):
+
+
+    userSubscriptionID = ctx.message.author.id #get the raw, global user id
+    userSubscriptionObject = bot.get_user(int(userSubscriptionID)) #turn global user id into friendly discord id (e.g. username#1337)
     
-    print(userSubscriptionID)
-    print(userSubscriptionObject)
-    
-    await ctx.send("Subscribed for websocket updates! UserID: " + str(userSubscriptionID) + " / " + userSubscriptionObject)
-    
-    async with websockets.connect('ws://localhost:8884/v1/subscribe') as websocket: #this is my second node (skid2)
-        while True:
-            try:
-                print("Waiting for websocket events on skid2!")
-                message = await websocket.recv()
-                print(message) #debug message info
-                print(userSubscriptionObject) #debug '!bolt subscribe' user info (replying to this user with incomming ws info...)
-                if (userSubscriptionObject):
-                    msg = json.loads(message)['result']['data'] #grab message from incomming message
-                    pubkey = json.loads(message)['result']['fromPubkey'] #grab sender public key from message
-                    for key, value in users.items(): #check to see if we are already tracking this pubkey/user
-                        if pubkey == value:
-                            pubkey = key
-                    await userSubscriptionObject.send("Incomming Message from Websocket! \n" + "From PublicKey/User: " + pubkey + "\n" + "Message: " + msg)
+    print(userSubscriptionID) #debug
+    print(userSubscriptionObject) #debug
 
-            except websockets.exceptions.ConnectionClosed:
-                print('ConnectionClosed')
-                is_alive = False
-                break
+    subscribedUsers[(str(userSubscriptionObject), userSubscriptionObject.id)] = pubkey
+    print(subscribedUsers) #debut
+
+    await ctx.send("Processing.... check your DMs...")
     
-    await ctx.send("Subscribed for websocket updates! UserID: " + str(userSubscriptionID))
-    
+    await userSubscriptionObject.send('''Subscribed for websocket updates! UserID: ''' + str(userSubscriptionObject) + '''! Tell your sender to format their IMP messages to you in the following format: \n\n```POST /v1/message/send\n\n{\n\t"msg":"''' + str(userSubscriptionObject) + ''':bolt:Hello there!",\n\t"pubkey":"''' + str(localNode) + '''"\n}``` ''')
+
+
+ 
     
 
 
-bot.run(TOKEN)
-
+bot.run(TOKEN) #start the bot
