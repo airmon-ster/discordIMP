@@ -72,6 +72,7 @@ async def on_ready():
                     resolvedUser = bot.get_user(key[1])
                     if str(resolvedUser) == discordUser:
                         await resolvedUser.send("Incomming Message from Websocket! \n" + "From PublicKey/User: " + pubkey + "\n" + "Message: " + discordUserMessage)
+                        await resolvedUser.send(file=discord.File(r'/home/lightning/Downloads/test.png'))
 
 
 
